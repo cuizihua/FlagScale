@@ -47,7 +47,7 @@ system:
 
 model:
   # Qwen3.5-35B-A3B (MoE) architecture parameters
-  deterministic_mode: True 
+  deterministic_mode: False 
   kv_channels: 256
   qk_layernorm: True
   attention_backend: unfused
@@ -136,7 +136,7 @@ model:
   moe_router_dtype: fp32
   moe_router_load_balancing_type: global_aux_loss
   moe_router_pre_softmax: False
-  moe_grouped_gemm: False
+  moe_grouped_gemm: True
   moe_token_dispatcher_type: alltoall
   moe_permute_fusion: False
   moe_aux_loss_coeff: 1.0e-3
