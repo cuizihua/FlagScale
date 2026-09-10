@@ -1,0 +1,46 @@
+# Vendor backend profiling config - 正确设置profile参数
+defaults:
+  - train
+  - _self_
+
+experiment:
+  exp_name: qwen35_4b_vendor_profile_npu_v3
+  exp_dir: ${oc.env:QWEN35_OUTPUT_DIR}
+  runner:
+    nproc_per_node: 2
+  envs:
+    CUDA_VISIBLE_DEVICES: ${oc.env:QWEN35_VISIBLE_DEVICES,"0,1"}
+
+train:
+  system:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    num_workers: 1
+    te_fl_prefer: vendor
+    # 启用profiling - 必须同时设置profile和use_pytorch_profiler
+    profile: true
+    use_pytorch_profiler: true
+    profile_step_start: 3
+    profile_step_end: 8
+    profile_ranks: [0]
+    pytorch_profiler_collect_shapes: true
+    pytorch_profiler_collect_memory: true
+    logging:
+      log_throughput: true
+      log_interval: 1
+    checkpoint:
+      load: ${oc.env:QWEN35_LOAD}
+      save: ${experiment.exp_dir}/checkpoints
+      save_interval: 1000
+  model:
+    seq_length: 512
+    max_padding_length: 512
+    train_iters: 15
+    global_batch_size: 2
+    eval_iters: 0
+    no_gradient_accumulation_fusion: true
+  data:
+    data_path: ${oc.env:QWEN35_DATA_PATH}
+    vision_root: ${oc.env:QWEN35_VISION_ROOT}
+    tokenizer:
+      tokenizer_path: ${oc.env:QWEN35_HF_PATH}

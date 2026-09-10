@@ -1,0 +1,39 @@
+# Reference backend verification config - 使用PyTorch reference实现
+defaults:
+  - train
+  - _self_
+
+experiment:
+  exp_name: qwen35_4b_reference_verify
+  exp_dir: ${oc.env:QWEN35_OUTPUT_DIR}
+  runner:
+    nproc_per_node: 2
+  envs:
+    CUDA_VISIBLE_DEVICES: ${oc.env:QWEN35_VISIBLE_DEVICES,"0,1"}
+
+train:
+  system:
+    tensor_model_parallel_size: 2
+    pipeline_model_parallel_size: 1
+    num_workers: 1
+    te_fl_prefer: reference  # 使用reference后端（纯PyTorch实现）
+    logging:
+      log_throughput: true
+      log_interval: 1
+    use_checkpoint_opt_param_scheduler: true
+    checkpoint:
+      load: ${oc.env:QWEN35_LOAD}
+      save: ${experiment.exp_dir}/checkpoints
+      save_interval: 50
+  model:
+    seq_length: 512
+    max_padding_length: 512
+    train_iters: ${oc.env:QWEN35_TRAIN_ITERS,100}
+    global_batch_size: 2
+    eval_iters: 0
+    no_gradient_accumulation_fusion: true  # NPU不支持，必须禁用
+  data:
+    data_path: ${oc.env:QWEN35_DATA_PATH}
+    vision_root: ${oc.env:QWEN35_VISION_ROOT}
+    tokenizer:
+      tokenizer_path: ${oc.env:QWEN35_HF_PATH}
