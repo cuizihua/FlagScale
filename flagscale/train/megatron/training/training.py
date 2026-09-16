@@ -75,6 +75,15 @@ _LEGACY_TRAIN_START_TIME = time.time() # NOTE(asolergi-nv): Legacy timestamp
 
 import torch
 
+# NPU profiler support
+try:
+    import torch_npu
+    import torch_npu.profiler as npu_profiler
+    USE_NPU_PROFILER = True
+except ImportError:
+    USE_NPU_PROFILER = False
+    npu_profiler = None
+
 try:
     from megatron.rl import rl_utils
     has_rl_utils = True
@@ -3431,7 +3440,8 @@ def post_training_step_callbacks(
         if args.use_pytorch_profiler:
             assert prof is not None
             prof.stop()
-            if prof.execution_trace_observer is not None:
+            # execution_trace_observer is only available in the standard PyTorch profiler.
+            if hasattr(prof, 'execution_trace_observer') and prof.execution_trace_observer is not None:
                 prof.execution_trace_observer.unregister_callback()
         else:
             torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStop())
@@ -3887,20 +3897,38 @@ def train(
             print(f"[CUDA] operator list is saved to: {operator_list_path}")
             ########## FlagScale Begin ##########
 
-        prof = torch.profiler.profile(
-            schedule=torch.profiler.schedule(
-                wait=max(args.profile_step_start - 1, 0),
-                warmup=1 if args.profile_step_start > 0 else 0,
-                active=args.profile_step_end - args.profile_step_start,
-                repeat=1,
-            ),
-            on_trace_ready=trace_handler,
-            record_shapes=args.pytorch_profiler_collect_shapes,
-            profile_memory=args.pytorch_profiler_collect_memory,  # FlagScale Modify
-            with_stack=args.pytorch_profiler_collect_callstack,
-            execution_trace_observer=et,
-        )
-        prof.start()
+        # Use the NPU profiler when available; otherwise use the standard PyTorch profiler.
+        if USE_NPU_PROFILER:
+            print_rank_0("Using torch_npu.profiler for NPU profiling")
+            prof = npu_profiler.profile(
+                schedule=npu_profiler.schedule(
+                    wait=max(args.profile_step_start - 1, 0),
+                    warmup=1 if args.profile_step_start > 0 else 0,
+                    active=args.profile_step_end - args.profile_step_start,
+                    repeat=1,
+                ),
+                on_trace_ready=trace_handler,
+                record_shapes=args.pytorch_profiler_collect_shapes,
+                profile_memory=args.pytorch_profiler_collect_memory,
+                with_stack=args.pytorch_profiler_collect_callstack,
+            )
+            prof.start()
+        else:
+            print_rank_0("Using standard torch.profiler")
+            prof = torch.profiler.profile(
+                schedule=torch.profiler.schedule(
+                    wait=max(args.profile_step_start - 1, 0),
+                    warmup=1 if args.profile_step_start > 0 else 0,
+                    active=args.profile_step_end - args.profile_step_start,
+                    repeat=1,
+                ),
+                on_trace_ready=trace_handler,
+                record_shapes=args.pytorch_profiler_collect_shapes,
+                profile_memory=args.pytorch_profiler_collect_memory,
+                with_stack=args.pytorch_profiler_collect_callstack,
+                execution_trace_observer=et,
+            )
+            prof.start()
 
     start_iteration = iteration
     # Disable forward pre-hook to start training to ensure that errors in checkpoint loading
