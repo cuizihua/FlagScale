@@ -75,6 +75,15 @@ _LEGACY_TRAIN_START_TIME = time.time() # NOTE(asolergi-nv): Legacy timestamp
 
 import torch
 
+# NPU profiler support
+try:
+    import torch_npu
+    import torch_npu.profiler as npu_profiler
+    USE_NPU_PROFILER = True
+except ImportError:
+    USE_NPU_PROFILER = False
+    npu_profiler = None
+
 try:
     from megatron.rl import rl_utils
     has_rl_utils = True
@@ -309,10 +318,6 @@ from flagscale.train.perf_monitor.hooks import (
 
 from megatron.plugin.platform import get_platform
 cur_platform = get_platform()
-
-# Load FlagScale training overrides before decorated functions are called.
-import megatron.plugin_flagscale  # noqa: F401
-
 _fs_straggler_detector = None
 
 
@@ -558,7 +563,7 @@ def update_seqlen_stats_from_cu_seqlens(cu_seqlens):
     # (e.g. unit tests). Production always supplies a CUDA tensor.
     if _seqlen_stats_in_iteration is None:
         device = (
-            cur_platform.device()
+            torch.device(f'cuda:{torch.cuda.current_device()}')
             if torch.cuda.is_available()
             else cu_seqlens.device
         )
@@ -2549,7 +2554,7 @@ def dummy_train_step(data_iterator):
             if tp_rank == 0:
                 batch = next(data_iterator)
                 for key in BATCH_KEYS:
-                    batch[key] = batch[key].to(cur_platform.device(), non_blocking=True) if key in batch and batch[key] is not None else None
+                    batch[key] = batch[key].cuda(non_blocking=True) if key in batch and batch[key] is not None else None
             batch = get_batch_on_this_tp_rank(
                 batch,
                 broadcast_src_rank=mpu.get_tensor_model_parallel_src_rank(),
@@ -3431,7 +3436,8 @@ def post_training_step_callbacks(
         if args.use_pytorch_profiler:
             assert prof is not None
             prof.stop()
-            if prof.execution_trace_observer is not None:
+            # execution_trace_observer只在标准torch.profiler中有
+            if hasattr(prof, 'execution_trace_observer') and prof.execution_trace_observer is not None:
                 prof.execution_trace_observer.unregister_callback()
         else:
             torch.cuda.check_error(torch.cuda.cudart().cudaProfilerStop())
@@ -3887,20 +3893,38 @@ def train(
             print(f"[CUDA] operator list is saved to: {operator_list_path}")
             ########## FlagScale Begin ##########
 
-        prof = torch.profiler.profile(
-            schedule=torch.profiler.schedule(
-                wait=max(args.profile_step_start - 1, 0),
-                warmup=1 if args.profile_step_start > 0 else 0,
-                active=args.profile_step_end - args.profile_step_start,
-                repeat=1,
-            ),
-            on_trace_ready=trace_handler,
-            record_shapes=args.pytorch_profiler_collect_shapes,
-            profile_memory=args.pytorch_profiler_collect_memory,  # FlagScale Modify
-            with_stack=args.pytorch_profiler_collect_callstack,
-            execution_trace_observer=et,
-        )
-        prof.start()
+        # 使用NPU profiler或标准torch profiler
+        if USE_NPU_PROFILER:
+            print_rank_0("Using torch_npu.profiler for NPU profiling")
+            prof = npu_profiler.profile(
+                schedule=npu_profiler.schedule(
+                    wait=max(args.profile_step_start - 1, 0),
+                    warmup=1 if args.profile_step_start > 0 else 0,
+                    active=args.profile_step_end - args.profile_step_start,
+                    repeat=1,
+                ),
+                on_trace_ready=trace_handler,
+                record_shapes=args.pytorch_profiler_collect_shapes,
+                profile_memory=args.pytorch_profiler_collect_memory,
+                with_stack=args.pytorch_profiler_collect_callstack,
+            )
+            prof.start()
+        else:
+            print_rank_0("Using standard torch.profiler")
+            prof = torch.profiler.profile(
+                schedule=torch.profiler.schedule(
+                    wait=max(args.profile_step_start - 1, 0),
+                    warmup=1 if args.profile_step_start > 0 else 0,
+                    active=args.profile_step_end - args.profile_step_start,
+                    repeat=1,
+                ),
+                on_trace_ready=trace_handler,
+                record_shapes=args.pytorch_profiler_collect_shapes,
+                profile_memory=args.pytorch_profiler_collect_memory,
+                with_stack=args.pytorch_profiler_collect_callstack,
+                execution_trace_observer=et,
+            )
+            prof.start()
 
     start_iteration = iteration
     # Disable forward pre-hook to start training to ensure that errors in checkpoint loading
@@ -4954,9 +4978,7 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
                     args.eval_iters = [None] * len(valid_dataloaders)
                 else:
                     local_eval_iters = [len(dl) for dl in valid_dataloaders]
-                    eval_iters_tensor = torch.tensor(
-                        local_eval_iters, dtype=torch.long, device=cur_platform.device()
-                    )
+                    eval_iters_tensor = torch.tensor(local_eval_iters, dtype=torch.long, device='cuda')
                     torch.distributed.all_reduce(
                         eval_iters_tensor,
                         op=torch.distributed.ReduceOp.MAX,
@@ -4965,9 +4987,7 @@ def build_train_valid_test_data_iterators(build_train_valid_test_datasets_provid
                     args.eval_iters = eval_iters_tensor.tolist()
             else:
                 local_eval_iters = len(valid_dataloaders[0])
-                eval_iters_tensor = torch.tensor(
-                    [local_eval_iters], dtype=torch.long, device=cur_platform.device()
-                )
+                eval_iters_tensor = torch.tensor([local_eval_iters], dtype=torch.long, device='cuda')
                 torch.distributed.all_reduce(
                     eval_iters_tensor,
                     op=torch.distributed.ReduceOp.MAX,
